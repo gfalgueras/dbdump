@@ -1,12 +1,15 @@
 package main
 
 import (
+	"archive/zip"
+	"compress/flate"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -15,51 +18,74 @@ import (
 
 var CONFIG Config
 
+var SOURCE_ARG string
+var TARGET_ARG string
+var DB_ARG string
+var USE_EMPTY_TABLES_ARG bool = true
+var ZIPFILENAME_ARG string
+
 type Config struct {
-	User_source          string
-	User_target          string
-	Ip_source            string
-	Ip_target            string
-	Passw_source         string
-	Passw_target         string
-	Tables_skip_data     []string
+	Servers              []Connection
+	Empty_tables         []string
 	Transactions         [][]string
 	Post_process_queries []string
 }
 
-func BuildDumpArgs(db string, ip string, user string, passw string) []string {
+type Connection struct {
+	Name     string
+	Ip       string
+	User     string
+	Password string
+}
+
+func GetDumpCommand(connection Connection, dbName string, withData bool) *exec.Cmd {
 	args := []string{
-		fmt.Sprintf("--host=%s", ip),
-		fmt.Sprintf("--user=%s", user),
+		fmt.Sprintf("--host=%s", connection.Ip),
+		fmt.Sprintf("--user=%s", connection.User),
 		"--skip-lock-tables",
 		"--max-allowed-packet=2GB",
 		"--single-transaction",
 		"--set-gtid-purged=OFF",
 	}
 
-	if passw != "" {
-		args = append(args, fmt.Sprintf("--password=%s", passw))
+	if connection.Password != "" {
+		args = append(args, fmt.Sprintf("--password=%s", connection.Password))
 	}
 
-	args = append(args, db)
+	args = append(args, dbName)
 
-	return args
+	if USE_EMPTY_TABLES_ARG && len(CONFIG.Empty_tables) > 0 {
+		if withData {
+			tables := lo.Map(CONFIG.Empty_tables, func(table string, index int) string {
+				return fmt.Sprintf("--ignore-table=%s.%s", dbName, table)
+			})
+
+			args = append(args, tables...)
+		} else {
+			args = append(args, "--no-data", "--no-create-db", "--no-tablespaces", "--tables")
+			args = append(args, CONFIG.Empty_tables...)
+		}
+	}
+
+	return exec.Command("mysqldump", args...)
 }
 
-func BuildMysqlArgs(db string, ip string, user string, passw string) []string {
+func GetMysqlCommand(connection Connection, dbName string) *exec.Cmd {
 	args := []string{
-		fmt.Sprintf("--host=%s", ip),
-		fmt.Sprintf("--user=%s", user),
-		fmt.Sprintf("--database=%s", db),
+		fmt.Sprintf("--host=%s", connection.Ip),
+		fmt.Sprintf("--user=%s", connection.User),
+		fmt.Sprintf("--database=%s", dbName),
 		"--max-allowed-packet=2GB",
 		"--ssl-mode=DISABLED",
 	}
 
-	if passw != "" {
-		args = append(args, fmt.Sprintf("--password=%s", passw))
+	if connection.Password != "" {
+		args = append(args, fmt.Sprintf("--password=%s", connection.Password))
 	}
 
-	return args
+	args = append(args, dbName)
+
+	return exec.Command("mysql", args...)
 }
 
 func PipeCommands(c1 *exec.Cmd, c2 *exec.Cmd) error {
@@ -96,14 +122,20 @@ func PipeCommands(c1 *exec.Cmd, c2 *exec.Cmd) error {
 	return nil
 }
 
-func CreateTargetDatabase(db *sql.DB, target string) error {
-	_, err := db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", target))
+func CreateTargetDatabase(connection Connection, dbName string) error {
+	sql, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/", connection.User, connection.Password, connection.Ip))
 
 	if err != nil {
 		return err
 	}
 
-	_, err = db.Exec(fmt.Sprintf("CREATE DATABASE %s", target))
+	_, err = sql.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", dbName))
+
+	if err != nil {
+		return err
+	}
+
+	_, err = sql.Exec(fmt.Sprintf("CREATE DATABASE %s", dbName))
 
 	if err != nil {
 		return err
@@ -112,20 +144,9 @@ func CreateTargetDatabase(db *sql.DB, target string) error {
 	return nil
 }
 
-func ReplicateTablesWithData(db *sql.DB, source string, target string) error {
-	dumpArgs := BuildDumpArgs(source, CONFIG.Ip_source, CONFIG.User_source, CONFIG.Passw_source)
-
-	tables := lo.Map(CONFIG.Tables_skip_data, func(table string, index int) string {
-		return fmt.Sprintf("--ignore-table=%s.%s", source, table)
-	})
-
-	dumpArgs = append(dumpArgs, tables...)
-
-	c1 := exec.Command("mysqldump", dumpArgs...)
-
-	mysqlArgs := BuildMysqlArgs(target, CONFIG.Ip_target, CONFIG.User_target, CONFIG.Passw_target)
-
-	c2 := exec.Command("mysql", mysqlArgs...)
+func ReplicateTablesWithData(source Connection, target Connection, sourceDB string, targetDB string) error {
+	c1 := GetDumpCommand(source, sourceDB, true)
+	c2 := GetMysqlCommand(target, targetDB)
 
 	err := PipeCommands(c1, c2)
 
@@ -136,17 +157,9 @@ func ReplicateTablesWithData(db *sql.DB, source string, target string) error {
 	return nil
 }
 
-func ReplicateTablesWithoutData(db *sql.DB, source string, target string) error {
-	dumpArgs := BuildDumpArgs(source, CONFIG.Ip_source, CONFIG.User_source, CONFIG.Passw_source)
-
-	dumpArgs = append(dumpArgs, "--no-data", "--no-create-db", "--no-tablespaces", "--tables")
-	dumpArgs = append(dumpArgs, CONFIG.Tables_skip_data...)
-
-	c1 := exec.Command("mysqldump", dumpArgs...)
-
-	mysqlArgs := BuildMysqlArgs(target, CONFIG.Ip_target, CONFIG.User_target, CONFIG.Passw_target)
-
-	c2 := exec.Command("mysql", mysqlArgs...)
+func ReplicateTablesWithoutData(source Connection, target Connection, sourceDB string, targetDB string) error {
+	c1 := GetDumpCommand(source, sourceDB, false)
+	c2 := GetMysqlCommand(target, targetDB)
 
 	err := PipeCommands(c1, c2)
 
@@ -157,15 +170,21 @@ func ReplicateTablesWithoutData(db *sql.DB, source string, target string) error 
 	return nil
 }
 
-func CleanTargetDatabase(db *sql.DB, target string) error {
-	_, err := db.Exec(fmt.Sprintf("USE %s", target))
+func CleanTargetDatabase(connection Connection, target string) error {
+	sql, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/", connection.User, connection.Password, connection.Ip))
+
+	if err != nil {
+		return err
+	}
+
+	_, err = sql.Exec(fmt.Sprintf("USE %s", target))
 
 	if err != nil {
 		return err
 	}
 
 	for _, query := range CONFIG.Post_process_queries {
-		_, err = db.Exec(query)
+		_, err = sql.Exec(query)
 
 		if err != nil {
 			return err
@@ -175,12 +194,14 @@ func CleanTargetDatabase(db *sql.DB, target string) error {
 	return nil
 }
 
-func ReplicateDatabase(db *sql.DB, source string, target string) error {
-	fmt.Printf("  %s ━━━▶ %s:\n", source, target)
+func ReplicateDatabase(source Connection, target Connection, sourceDB string, targetDB string) error {
+	fmt.Printf("  %s:%s ━━━▶ %s:%s\n", source.Name, sourceDB, target.Name, targetDB)
+
+	start := time.Now()
 
 	/* Replicate source database onto target database, ignoring some tables */
 	fmt.Print("  ┗━ Creating target database ...")
-	err := CreateTargetDatabase(db, target)
+	err := CreateTargetDatabase(target, targetDB)
 	if err != nil {
 		fmt.Print("\r  ┗━ Creating target database ... ✖\n")
 		return err
@@ -189,7 +210,7 @@ func ReplicateDatabase(db *sql.DB, source string, target string) error {
 
 	/* Replicate source database onto target database, ignoring some tables */
 	fmt.Print("  ┗━ Replicating tables with data ...")
-	err = ReplicateTablesWithData(db, source, target)
+	err = ReplicateTablesWithData(source, target, sourceDB, targetDB)
 	if err != nil {
 		fmt.Print("\r  ┗━ Replicating tables with data ... ✖\n")
 		return err
@@ -198,31 +219,260 @@ func ReplicateDatabase(db *sql.DB, source string, target string) error {
 
 	/* Replicate schema for the ignored tables on the previous step */
 	fmt.Print("  ┗━ Replicating tables without data ...")
-	err = ReplicateTablesWithoutData(db, source, target)
+	err = ReplicateTablesWithoutData(source, target, sourceDB, targetDB)
 	if err != nil {
 		fmt.Print("\r  ┗━ Replicating tables without data ... ✖\n")
 		return err
 	}
 	fmt.Print("\r  ┣━ Replicating tables without data ... ✔\n")
 
-	/* Clear user data */
-	fmt.Print("  ┗━ Clear user data ...")
-	err = CleanTargetDatabase(db, target)
-	if err != nil {
-		fmt.Print("\r  ┗━ Clear user data ... ✖\n")
-		return err
+	if USE_EMPTY_TABLES_ARG {
+		/* Clear user data */
+		fmt.Print("  ┗━ Clear user data ...")
+		err = CleanTargetDatabase(target, targetDB)
+		if err != nil {
+			fmt.Print("\r  ┗━ Clear user data ... ✖\n")
+			return err
+		}
+		fmt.Print("\r  ┣━ Clear user data ... ✔\n")
 	}
-	fmt.Print("\r  ┗━ Clear user data ... ✔\n\n")
+
+	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
+	fmt.Printf("\r ┗━ Done in %sm\n", diff)
 
 	return nil
 }
 
-func main() {
-	file := "config.json"
+func RunBulk() error {
+	sourceIndex := slices.IndexFunc(CONFIG.Servers, func(c Connection) bool {
+		return c.Name == SOURCE_ARG
+	})
 
-	if len(os.Args) == 2 {
-		file = os.Args[1]
+	if sourceIndex == -1 {
+		return fmt.Errorf("source '%s' not found in config file", SOURCE_ARG)
 	}
+
+	source := CONFIG.Servers[sourceIndex]
+
+	targetIndex := slices.IndexFunc(CONFIG.Servers, func(c Connection) bool {
+		return c.Name == TARGET_ARG
+	})
+
+	if sourceIndex == -1 {
+		return fmt.Errorf("source '%s' not found in config file", SOURCE_ARG)
+	}
+
+	target := CONFIG.Servers[targetIndex]
+
+	start := time.Now()
+
+	fmt.Println("\nStart bulk dump")
+
+	counter := 0
+
+	for _, transaction := range CONFIG.Transactions {
+		err := ReplicateDatabase(source, target, transaction[0], transaction[1])
+
+		if err != nil {
+			fmt.Println(err.Error())
+			break
+		}
+
+		counter++
+	}
+
+	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
+	fmt.Printf("%d databases done in %sm\n", counter, diff)
+
+	return nil
+}
+
+func CopyToZip() error {
+	USE_EMPTY_TABLES_ARG = false
+
+	sourceIndex := slices.IndexFunc(CONFIG.Servers, func(c Connection) bool {
+		return c.Name == SOURCE_ARG
+	})
+
+	if sourceIndex == -1 {
+		return fmt.Errorf("source '%s' not found in config file", SOURCE_ARG)
+	}
+
+	source := CONFIG.Servers[sourceIndex]
+
+	start := time.Now()
+	fmt.Printf("Zipping %s ...", DB_ARG)
+
+	/* Dump database to sql file */
+	dumpcommand := GetDumpCommand(source, DB_ARG, true)
+
+	zipFileName := fmt.Sprintf("%s_%s.sql", DB_ARG, time.Now().Format("20060102150405"))
+	file, err := os.Create(zipFileName)
+
+	if err != nil {
+		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		return err
+	}
+
+	defer file.Close()
+
+	dumpcommand.Stdout = file
+
+	err = dumpcommand.Start()
+
+	if err != nil {
+		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		return err
+	}
+
+	dumpcommand.Wait()
+
+	/* Create zip archive */
+	archive, err := os.Create(fmt.Sprintf("./%s", ZIPFILENAME_ARG))
+
+	if err != nil {
+		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		return err
+	}
+
+	defer archive.Close()
+
+	zipWriter := zip.NewWriter(archive)
+
+	// Register a custom Deflate compressor.
+	zipWriter.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(out, flate.BestCompression)
+	})
+
+	/* Read sql file */
+	fileReader, err := os.Open(zipFileName)
+
+	if err != nil {
+		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		return err
+	}
+
+	defer fileReader.Close()
+
+	/* Copy sql file to zip archive */
+	archiveWriter, err := zipWriter.Create(zipFileName)
+
+	if err != nil {
+		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		return err
+	}
+
+	if _, err := io.Copy(archiveWriter, fileReader); err != nil {
+		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		return err
+	}
+
+	zipWriter.Close()
+
+	os.Remove(zipFileName)
+
+	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
+	fmt.Printf("\rZipping %s ... ✔. Elapsed time: %sm\n", DB_ARG, diff)
+
+	return nil
+}
+
+func CopyToDb() error {
+	sourceIndex := slices.IndexFunc(CONFIG.Servers, func(c Connection) bool {
+		return c.Name == SOURCE_ARG
+	})
+
+	if sourceIndex == -1 {
+		return fmt.Errorf("source '%s' not found in config file", SOURCE_ARG)
+	}
+
+	source := CONFIG.Servers[sourceIndex]
+
+	targetIndex := slices.IndexFunc(CONFIG.Servers, func(c Connection) bool {
+		return c.Name == TARGET_ARG
+	})
+
+	if targetIndex == -1 {
+		return fmt.Errorf("source '%s' not found in config file", SOURCE_ARG)
+	}
+
+	target := CONFIG.Servers[targetIndex]
+
+	err := ReplicateDatabase(source, target, DB_ARG, DB_ARG)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func RunCopy() error {
+	if TARGET_ARG == "zip" {
+		return CopyToZip()
+	} else {
+		return CopyToDb()
+	}
+}
+
+func HelpDump() {
+	fmt.Println("Usage: dump [COMMAND] [POSITIONAL ARGS] [FLAGS]")
+	fmt.Println("")
+	fmt.Println("Commands: bulk, copy")
+	fmt.Println("")
+	fmt.Println("Flags:")
+	fmt.Println("  -h       Show help for the command")
+}
+
+func HelpCopy() {
+	fmt.Println("Usage: copy SOURCE TARGET DB [FLAGS]")
+	fmt.Println("       copy SOURCE zip DB [FLAGS]")
+	fmt.Println("")
+	fmt.Println("Arguments:")
+	fmt.Println("  SOURCE   Name of the source database")
+	fmt.Println("  TARGET   Name of the target database or zip")
+	fmt.Println("  DB       Name of the database to dump")
+	fmt.Println("")
+	fmt.Println("Flags:")
+	fmt.Println("  -h       Show this help")
+	fmt.Println("  -i       Performs full dump ignoring post-cleanup queries and empty-tables configuration")
+	fmt.Println("  -f       Filename for the generated zip")
+}
+
+func HelpBulk() {
+	fmt.Println("Usage: bulk SOURCE TARGET [FLAGS]")
+	fmt.Println("")
+	fmt.Println("Arguments:")
+	fmt.Println("  SOURCE   Name of the source database")
+	fmt.Println("  TARGET   Name of the target database")
+	fmt.Println("")
+	fmt.Println("Flags:")
+	fmt.Println("  -h       Show this help")
+	fmt.Println("  -i       Performs full dump ignoring post-cleanup queries and empty-tables configuration")
+}
+
+func main() {
+	if len(os.Args) < 2 || (os.Args[1] != "bulk" && os.Args[1] != "copy") {
+		HelpDump()
+		return
+	}
+
+	command := os.Args[1]
+
+	if len(os.Args) == 3 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
+		if command == "copy" {
+			HelpCopy()
+			return
+		} else if command == "bulk" {
+			HelpBulk()
+			return
+		} else {
+			HelpDump()
+			return
+		}
+	}
+
+	file := "config.json"
 
 	data, err := os.ReadFile(file)
 
@@ -238,35 +488,38 @@ func main() {
 		return
 	}
 
-	if CONFIG.Ip_source == "" || CONFIG.Ip_target == "" || CONFIG.User_source == "" || CONFIG.User_target == "" {
-		fmt.Print("Missing configuration params")
+	if len(os.Args) < 4 {
+		HelpDump()
 		return
 	}
 
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/", CONFIG.User_target, CONFIG.Passw_target, CONFIG.Ip_target))
+	SOURCE_ARG = os.Args[2]
+	TARGET_ARG = os.Args[3]
 
-	if err != nil {
-		fmt.Print(err.Error())
-		return
+	if len(os.Args) == 5 {
+		DB_ARG = os.Args[4]
 	}
 
-	start := time.Now()
+	ZIPFILENAME_ARG = fmt.Sprintf("%s_%s.zip", DB_ARG, time.Now().Format("20060102150405"))
 
-	fmt.Println("\nStart test dump")
+	fileFlag := false
 
-	counter := 0
-
-	for _, transaction := range CONFIG.Transactions {
-		err := ReplicateDatabase(db, transaction[0], transaction[1])
-
-		if err != nil {
-			fmt.Println(err.Error())
+	for _, arg := range os.Args[4:] {
+		if fileFlag {
+			ZIPFILENAME_ARG = arg
 			break
 		}
 
-		counter++
+		if arg == "-i" {
+			USE_EMPTY_TABLES_ARG = false
+		} else if arg == "-f" || arg == "--file" {
+			fileFlag = true
+		}
 	}
 
-	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
-	fmt.Printf("\nDatabases: %d. Elapsed time: %sm\n", counter, diff)
+	if command == "bulk" {
+		RunBulk()
+	} else if command == "copy" {
+		RunCopy()
+	}
 }

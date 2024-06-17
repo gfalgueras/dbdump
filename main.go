@@ -203,7 +203,7 @@ func ReplicateDatabase(source Connection, target Connection, sourceDB string, ta
 	fmt.Print("  ┗━ Creating target database ...")
 	err := CreateTargetDatabase(target, targetDB)
 	if err != nil {
-		fmt.Print("\r  ┗━ Creating target database ... ✖\n")
+		fmt.Print("\r  ┗━ Creating target database ... ✖\n\n")
 		return err
 	}
 	fmt.Print("\r  ┣━ Creating target database ... ✔\n")
@@ -212,7 +212,7 @@ func ReplicateDatabase(source Connection, target Connection, sourceDB string, ta
 	fmt.Print("  ┗━ Replicating tables with data ...")
 	err = ReplicateTablesWithData(source, target, sourceDB, targetDB)
 	if err != nil {
-		fmt.Print("\r  ┗━ Replicating tables with data ... ✖\n")
+		fmt.Print("\r  ┗━ Replicating tables with data ... ✖\n\n")
 		return err
 	}
 	fmt.Print("\r  ┣━ Replicating tables with data ... ✔\n")
@@ -221,7 +221,7 @@ func ReplicateDatabase(source Connection, target Connection, sourceDB string, ta
 	fmt.Print("  ┗━ Replicating tables without data ...")
 	err = ReplicateTablesWithoutData(source, target, sourceDB, targetDB)
 	if err != nil {
-		fmt.Print("\r  ┗━ Replicating tables without data ... ✖\n")
+		fmt.Print("\r  ┗━ Replicating tables without data ... ✖\n\n")
 		return err
 	}
 	fmt.Print("\r  ┣━ Replicating tables without data ... ✔\n")
@@ -231,14 +231,14 @@ func ReplicateDatabase(source Connection, target Connection, sourceDB string, ta
 		fmt.Print("  ┗━ Clear user data ...")
 		err = CleanTargetDatabase(target, targetDB)
 		if err != nil {
-			fmt.Print("\r  ┗━ Clear user data ... ✖\n")
+			fmt.Print("\r  ┗━ Clear user data ... ✖\n\n")
 			return err
 		}
 		fmt.Print("\r  ┣━ Clear user data ... ✔\n")
 	}
 
 	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
-	fmt.Printf("\r  ┗━ Done in %sm\n", diff)
+	fmt.Printf("\r  ┗━ Done in %sm\n\n", diff)
 
 	return nil
 }
@@ -321,7 +321,7 @@ func CopyToZip() error {
 	err = dumpcommand.Start()
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
 		return err
 	}
 
@@ -331,7 +331,7 @@ func CopyToZip() error {
 	archive, err := os.Create(fmt.Sprintf("./%s", ZIPFILENAME_ARG))
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
 		return err
 	}
 
@@ -348,7 +348,7 @@ func CopyToZip() error {
 	fileReader, err := os.Open(zipFileName)
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
 		return err
 	}
 
@@ -358,12 +358,12 @@ func CopyToZip() error {
 	archiveWriter, err := zipWriter.Create(zipFileName)
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
 		return err
 	}
 
 	if _, err := io.Copy(archiveWriter, fileReader); err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
 		return err
 	}
 
@@ -372,7 +372,7 @@ func CopyToZip() error {
 	os.Remove(zipFileName)
 
 	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
-	fmt.Printf("\rZipping %s ... ✔. Elapsed time: %sm\n", DB_ARG, diff)
+	fmt.Printf("\rZipping %s ... ✔. Elapsed time: %sm\n\n", DB_ARG, diff)
 
 	return nil
 }

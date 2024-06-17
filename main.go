@@ -238,7 +238,7 @@ func ReplicateDatabase(source Connection, target Connection, sourceDB string, ta
 	}
 
 	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
-	fmt.Printf("\r ┗━ Done in %sm\n", diff)
+	fmt.Printf("\r  ┗━ Done in %sm\n", diff)
 
 	return nil
 }
@@ -306,7 +306,7 @@ func CopyToZip() error {
 	/* Dump database to sql file */
 	dumpcommand := GetDumpCommand(source, DB_ARG, true)
 
-	zipFileName := fmt.Sprintf("%s_%s.sql", DB_ARG, time.Now().Format("20060102150405"))
+	zipFileName := fmt.Sprintf("%s_%s.sql", DB_ARG, time.Now().Format("2006_01_02_15_04_05"))
 	file, err := os.Create(zipFileName)
 
 	if err != nil {
@@ -500,7 +500,7 @@ func main() {
 		DB_ARG = os.Args[4]
 	}
 
-	ZIPFILENAME_ARG = fmt.Sprintf("%s_%s.zip", DB_ARG, time.Now().Format("20060102150405"))
+	ZIPFILENAME_ARG = fmt.Sprintf("%s_%s.zip", DB_ARG, time.Now().Format("2006_01_02_15_04_05"))
 
 	fileFlag := false
 

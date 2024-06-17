@@ -518,8 +518,16 @@ func main() {
 	}
 
 	if command == "bulk" {
-		RunBulk()
+		err = RunBulk()
+
+		if err != nil {
+			fmt.Println(err)
+		}
 	} else if command == "copy" {
-		RunCopy()
+		err = RunCopy()
+
+		if err != nil {
+			fmt.Println(err)
+		}
 	}
 }

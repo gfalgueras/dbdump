@@ -1,4 +1,5 @@
 *.json
 *.exe
-.vscode
 .idea
+*.sql
+*.zip

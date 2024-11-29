@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -23,6 +24,7 @@ var TARGET_ARG string
 var DB_ARG string
 var USE_EMPTY_TABLES_ARG bool = true
 var ZIPFILENAME_ARG string
+var ZIPOUTPUTFOLDER_ARG string = ""
 
 type Config struct {
 	Servers              []Connection
@@ -43,6 +45,7 @@ func GetDumpCommand(connection Connection, dbName string, withData bool) *exec.C
 		fmt.Sprintf("--host=%s", connection.Ip),
 		fmt.Sprintf("--user=%s", connection.User),
 		"--skip-lock-tables",
+		"--default-character-set=utf8mb4",
 		"--max-allowed-packet=2GB",
 		"--single-transaction",
 		"--set-gtid-purged=OFF",
@@ -114,6 +117,22 @@ func PipeCommands(c1 *exec.Cmd, c2 *exec.Cmd) error {
 	}()
 
 	err = c2.Wait()
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func CheckSourceDatabase(connection Connection, dbName string) error {
+	sql, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:3306)/", connection.User, connection.Password, connection.Ip))
+
+	if err != nil {
+		return err
+	}
+
+	_, err = sql.Exec(fmt.Sprintf("USE %s", dbName))
 
 	if err != nil {
 		return err
@@ -201,7 +220,14 @@ func ReplicateDatabase(source Connection, target Connection, sourceDB string, ta
 
 	/* Replicate source database onto target database, ignoring some tables */
 	fmt.Print("  ┗━ Creating target database ...")
-	err := CreateTargetDatabase(target, targetDB)
+
+	err := CheckSourceDatabase(source, sourceDB)
+	if err != nil {
+		fmt.Print("\r  ┗━ Creating target database ... ✖\n\n")
+		return err
+	}
+
+	err = CreateTargetDatabase(target, targetDB)
 	if err != nil {
 		fmt.Print("\r  ┗━ Creating target database ... ✖\n\n")
 		return err
@@ -300,38 +326,61 @@ func CopyToZip() error {
 
 	source := CONFIG.Servers[sourceIndex]
 
+	var zipFolder string
+
+	if ZIPOUTPUTFOLDER_ARG != "" {
+		zipFolder = strings.Trim(ZIPOUTPUTFOLDER_ARG, "/") + "/"
+	} else {
+		zipFolder = "./"
+	}
+
+	err := os.MkdirAll(zipFolder, os.ModePerm)
+
+	if err != nil {
+		return err
+	}
+
+	zipFileName := fmt.Sprintf("%s_%s.sql", DB_ARG, time.Now().Format("2006_01_02_15_04_05"))
+	zipFilePath := zipFolder + zipFileName
+
 	start := time.Now()
-	fmt.Printf("Zipping %s ...", DB_ARG)
+	fmt.Printf("Zipping %s from %s to %s ...", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
+
+	err = CheckSourceDatabase(source, DB_ARG)
+
+	if err != nil {
+		fmt.Printf("\rZipping %s from %s to %s ... ✖.\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
+		return err
+	}
 
 	/* Dump database to sql file */
 	dumpcommand := GetDumpCommand(source, DB_ARG, true)
 
-	zipFileName := fmt.Sprintf("%s_%s.sql", DB_ARG, time.Now().Format("2006_01_02_15_04_05"))
-	file, err := os.Create(zipFileName)
+	file, err := os.Create(zipFilePath)
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n", DB_ARG)
+		fmt.Printf("\rZipping %s from %s to %s ... ✖.\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
 		return err
 	}
-
-	defer file.Close()
 
 	dumpcommand.Stdout = file
 
 	err = dumpcommand.Start()
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
+		fmt.Printf("\rZipping %s from %s to %s ... ✖.\n\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
 		return err
 	}
 
 	dumpcommand.Wait()
 
+	file.Close()
+
 	/* Create zip archive */
-	archive, err := os.Create(fmt.Sprintf("./%s", ZIPFILENAME_ARG))
+	archive, err := os.Create(zipFolder + ZIPFILENAME_ARG)
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
+		fmt.Printf("\rZipping %s from %s to %s ... ✖.\n\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
 		return err
 	}
 
@@ -344,35 +393,37 @@ func CopyToZip() error {
 		return flate.NewWriter(out, flate.BestCompression)
 	})
 
+	defer zipWriter.Close()
+
 	/* Read sql file */
-	fileReader, err := os.Open(zipFileName)
+	fileReader, err := os.Open(zipFilePath)
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
+		fmt.Printf("\rZipping %s from %s to %s ... ✖.\n\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
 		return err
 	}
 
-	defer fileReader.Close()
-
 	/* Copy sql file to zip archive */
-	archiveWriter, err := zipWriter.Create(zipFileName)
+	archiveWriter, err := zipWriter.Create(zipFilePath)
 
 	if err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
+		fmt.Printf("\rZipping %s from %s to %s ... ✖.\n\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
 		return err
 	}
 
 	if _, err := io.Copy(archiveWriter, fileReader); err != nil {
-		fmt.Printf("\rZipping %s ... ✖.\n\n", DB_ARG)
+		fmt.Printf("\rZipping %s from %s to %s ... ✖.\n\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG)
 		return err
 	}
 
-	zipWriter.Close()
+	fileReader.Close()
 
-	os.Remove(zipFileName)
+	if err = os.Remove(zipFilePath); err != nil {
+		return err
+	}
 
 	diff := time.Time{}.Add(time.Since(start)).Format("04:05")
-	fmt.Printf("\rZipping %s ... ✔. Elapsed time: %sm\n\n", DB_ARG, diff)
+	fmt.Printf("\rZipping %s from %s to %s ... ✔. Elapsed time: %sm\n\n", DB_ARG, source.Name, zipFolder+ZIPFILENAME_ARG, diff)
 
 	return nil
 }
@@ -437,6 +488,7 @@ func HelpCopy() {
 	fmt.Println("  -h       Show this help")
 	fmt.Println("  -i       Performs full dump ignoring post-cleanup queries and empty-tables configuration")
 	fmt.Println("  -f       Filename for the generated zip")
+	fmt.Println("  -o       Output folder for the zip file")
 }
 
 func HelpBulk() {
@@ -496,26 +548,32 @@ func main() {
 	SOURCE_ARG = os.Args[2]
 	TARGET_ARG = os.Args[3]
 
-	if len(os.Args) == 5 {
-		DB_ARG = os.Args[4]
-	}
-
-	ZIPFILENAME_ARG = fmt.Sprintf("%s_%s.zip", DB_ARG, time.Now().Format("2006_01_02_15_04_05"))
-
-	fileFlag := false
+	filenameFlag := false
+	outputFolderFlag := false
 
 	for _, arg := range os.Args[4:] {
-		if fileFlag {
+		if filenameFlag {
 			ZIPFILENAME_ARG = arg
-			break
+			filenameFlag = false
+			continue
+		} else if outputFolderFlag {
+			ZIPOUTPUTFOLDER_ARG = arg
+			outputFolderFlag = false
+			continue
 		}
 
 		if arg == "-i" {
 			USE_EMPTY_TABLES_ARG = false
 		} else if arg == "-f" || arg == "--file" {
-			fileFlag = true
+			filenameFlag = true
+		} else if arg == "-o" {
+			outputFolderFlag = true
+		} else {
+			DB_ARG = arg
 		}
 	}
+
+	ZIPFILENAME_ARG = fmt.Sprintf("%s_%s.zip", DB_ARG, time.Now().Format("2006_01_02_15_04_05"))
 
 	if command == "bulk" {
 		err = RunBulk()

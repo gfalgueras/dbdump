@@ -22,6 +22,7 @@ var CONFIG Config
 var SOURCE_ARG string
 var TARGET_ARG string
 var DB_ARG string
+var DB_ARG_RENAME string
 var USE_EMPTY_TABLES_ARG bool = true
 var ZIPFILENAME_ARG string
 var ZIPOUTPUTFOLDER_ARG string = ""
@@ -449,7 +450,13 @@ func CopyToDb() error {
 
 	target := CONFIG.Servers[targetIndex]
 
-	err := ReplicateDatabase(source, target, DB_ARG, DB_ARG)
+	var err error
+
+	if DB_ARG_RENAME != "" {
+		err = ReplicateDatabase(source, target, DB_ARG, DB_ARG_RENAME)
+	} else {
+		err = ReplicateDatabase(source, target, DB_ARG, DB_ARG)
+	}
 
 	if err != nil {
 		return err
@@ -476,19 +483,20 @@ func HelpDump() {
 }
 
 func HelpCopy() {
-	fmt.Println("Usage: copy SOURCE TARGET DB [FLAGS]")
+	fmt.Println("Usage: copy SOURCE TARGET DB DB_RENAME [FLAGS]")
 	fmt.Println("       copy SOURCE zip DB [FLAGS]")
 	fmt.Println("")
 	fmt.Println("Arguments:")
-	fmt.Println("  SOURCE   Name of the source database")
-	fmt.Println("  TARGET   Name of the target database or zip")
-	fmt.Println("  DB       Name of the database to dump")
+	fmt.Println("  SOURCE    Name of the source database")
+	fmt.Println("  TARGET    Name of the target database or zip")
+	fmt.Println("  DB        Name of the database to dump")
+	fmt.Println("  DB_RENAME New name for the database on the target server")
 	fmt.Println("")
 	fmt.Println("Flags:")
-	fmt.Println("  -h       Show this help")
-	fmt.Println("  -i       Performs full dump ignoring post-cleanup queries and empty-tables configuration")
-	fmt.Println("  -f       Filename for the generated zip")
-	fmt.Println("  -o       Output folder for the zip file")
+	fmt.Println("  -h        Show this help")
+	fmt.Println("  -i        Performs full dump ignoring post-cleanup queries and empty-tables configuration")
+	fmt.Println("  -f        Filename for the generated zip")
+	fmt.Println("  -o        Output folder for the zip file")
 }
 
 func HelpBulk() {
@@ -568,8 +576,10 @@ func main() {
 			filenameFlag = true
 		} else if arg == "-o" {
 			outputFolderFlag = true
-		} else {
+		} else if DB_ARG == "" {
 			DB_ARG = arg
+		} else {
+			DB_ARG_RENAME = arg
 		}
 	}
 

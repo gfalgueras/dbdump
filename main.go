@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -532,7 +533,16 @@ func main() {
 		}
 	}
 
-	file := "config.json"
+	// Get the absolute path of the executable
+	execPath, err := os.Executable()
+	if err != nil {
+		fmt.Println("Error getting executable path:", err)
+		return
+	}
+
+	// Get the directory where the executable is located
+	execDir := filepath.Dir(execPath)
+	file := filepath.Join(execDir, "config.json")
 
 	data, err := os.ReadFile(file)
 
